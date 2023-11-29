@@ -7,9 +7,9 @@
 # Declare variables to be passed into your templates.
 
 image:
-  registry: ghcr.io
-  name: gardener/connectivity-exporter
-  tag: main
+  registry: hanaservice-dev.common.repositories.cloud.sap
+  name: connectivity-exporter/connectivity-exporter-i826622
+  tag: i826622-test
   pullPolicy: Always
 
 tolerations: []

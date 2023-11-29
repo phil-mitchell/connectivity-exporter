@@ -6,10 +6,10 @@
 
 cd "$(dirname "$(realpath "$0")")" || exit 1
 
-helm upgrade --install \
+~/helm3/linux-amd64/helm upgrade --install \
   connectivity-exporter ../../charts/connectivity-exporter \
   --create-namespace \
-  --namespace connectivity-exporter \
+  --namespace monitoring \
   --values ../../charts/connectivity-exporter/values.yaml \
-  --values gardener-values.yaml \
-  --set-string filteredPorts="$(./node-port.sh)"
+  --values gardener-values.yaml #\
+  #--set-string filteredPorts="$(./node-port.sh)"

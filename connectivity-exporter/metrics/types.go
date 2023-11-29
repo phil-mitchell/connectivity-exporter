@@ -22,6 +22,8 @@ type Inc struct {
 	RejectedConnections,
 	RejectedConnectionsByClient float64
 	SNI string
+	SourceIP string
+	DestIP string
 }
 
 const (
@@ -35,7 +37,7 @@ var (
 			Namespace: namespace,
 			Name:      "seconds_total",
 			Help:      "Total number of seconds.",
-		}, []string{"kind", "sni"},
+		}, []string{"kind", "sni", "source_ip", "dest_ip"},
 	)
 
 	connections = promauto.NewCounterVec(
@@ -43,7 +45,7 @@ var (
 			Namespace: namespace,
 			Name:      "connections_total",
 			Help:      "Total number of new connections.",
-		}, []string{"kind", "sni"},
+		}, []string{"kind", "sni", "source_ip", "dest_ip"},
 	)
 
 	// Use promextra.NewPrecomputedHistogramAuto to register the metric

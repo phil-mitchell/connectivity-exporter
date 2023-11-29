@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#define randomized_struct_fields_start  struct {
+#define randomized_struct_fields_end    };
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -82,7 +84,7 @@ struct bpf_map_def SEC("maps") stats = {
 
 struct bpf_map_def SEC("maps") sni_stats = {
   .type = BPF_MAP_TYPE_HASH,
-  .key_size = sizeof(char[TLS_MAX_SERVER_NAME_LEN]),
+  .key_size = sizeof(char[TLS_MAX_SERVER_NAME_LEN])+8,
   .value_size = sizeof(struct sni_stats_t),
   .max_entries = MAX_SERVER_COUNT,
 };
@@ -345,6 +347,8 @@ int capture_packets_internal(struct __sk_buff *skb)
       .ticker_clock_first_packet = *clock_key_ptr,
       // TODO: Add more fields.
     };
+    value.i.id.source_ip = key.source_ip;
+    value.i.id.dest_ip = key.dest_ip;
     bpf_map_update_elem(&connections, &key, &value, BPF_ANY);
     // TODO: We aren't returning here because we still want to push the packet
     // to the queue as long as we don't have complete business logic in eBPF.
@@ -368,7 +372,7 @@ int capture_packets_internal(struct __sk_buff *skb)
     if (conn->state == SNI_RECEIVED) {
       if (conn->num_packets > CONN_MIN_NUM_OF_PACKETS
           || conn->total_data_bytes > CONN_MIN_DATA_BYTES) {
-        add_connection_to_stats(&key, conn->sni, true);
+        add_connection_to_stats(&key, conn->i.key, true);
       }
     } else {
       // Parse SNI.
@@ -379,7 +383,7 @@ int capture_packets_internal(struct __sk_buff *skb)
         for (int i = 0; i < TLS_MAX_SERVER_NAME_LEN; i++) {
           if (sni[i] == '\0')
             break;
-          conn->sni[i] = sni[i];
+          conn->i.id.sni[i] = sni[i];
         }
         conn->state = SNI_RECEIVED;
       }
@@ -394,19 +398,19 @@ int capture_packets_internal(struct __sk_buff *skb)
       conn->state = RST_SENT_BY_SERVER;
       // Server RST could indicate server unavailability. Therefore, treat
       // the connection as failed.
-      add_connection_to_stats(&key, conn->sni, false);
+      add_connection_to_stats(&key, conn->i.key, false);
     } else { // Client RST
       conn->state = RST_SENT_BY_CLIENT;
       // Client RST does not indicate server unavailability. Therefore, treat
       // the connection as successful.
-      add_connection_to_stats(&key, conn->sni, true);
+      add_connection_to_stats(&key, conn->i.key, true);
     }
   }
 
   if (tcph.fin) {
     if (conn) {
       conn->state = FIN_RECEIVED;
-      add_connection_to_stats(&key, conn->sni, true);
+      add_connection_to_stats(&key, conn->i.key, true);
     }
   }
 

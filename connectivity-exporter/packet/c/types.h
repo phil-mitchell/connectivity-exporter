@@ -97,7 +97,14 @@ struct tuple_data_t {
     RST_SENT_BY_SERVER,
     FIN_RECEIVED,
   } state;
-  char sni[TLS_MAX_SERVER_NAME_LEN];
+    union {
+        struct {
+            __u32 source_ip;
+            __u32 dest_ip;
+            char sni[TLS_MAX_SERVER_NAME_LEN];
+        } id;
+        char key[4+TLS_MAX_SERVER_NAME_LEN];
+    } i;
   // The following two fields cause clang to crash when set to __u16.
   __u64 num_packets;
   __u64 total_data_bytes;

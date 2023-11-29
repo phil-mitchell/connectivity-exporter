@@ -27,6 +27,9 @@ spec:
 {{ toYaml .Values.tolerations | indent 6 }}
     {{- end }}
 
+      imagePullSecrets:
+        - name: regsecret
+
       containers:
 
       - name: connectivity-exporter

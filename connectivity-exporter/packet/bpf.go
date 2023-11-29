@@ -38,6 +38,9 @@ const (
 	BPF_TICKER_CLOCK_MAP_NAME = "ticker_clock"
 	BPF_STATS_MAP_NAME        = "stats"
 	BPF_SNI_STATS_MAP_NAME    = "sni_stats"
+
+	BPF_WRITE_START_MAP_NAME = "write_start"
+	BPF_WRITE_EVENTS_MAP_NAME = "write_events"
 )
 
 func init() {
@@ -151,43 +154,38 @@ func setupMaps(config *ebpfConfig) error {
 // the eBPF program. Closing the socket should unload the program and
 // decrease the reference count on the program.
 type ebpfAttachment struct {
-	socketFD int
+	socketFD [32]int
 }
 
 // attachProgramToNetworkInterface returns an ebpfAttachment object
 func attachProgramToNetworkInterface(prog *ebpf.Program, networkInterface string) (*ebpfAttachment, error) {
-	ifaceIndex := 0
-	if networkInterface != "" {
-		iface, err := net.InterfaceByName(networkInterface)
+	attachment := &ebpfAttachment{}
+	for ifaceIndex := 0; ifaceIndex < len(attachment.socketFD); ifaceIndex++ {
+		fd, err := openRawSock(ifaceIndex)
 		if err != nil {
-			return nil, err
+			klog.Errorf("Failed to open socket for interface %d: %w\n", ifaceIndex, err)
+			continue
 		}
-		ifaceIndex = iface.Index
-	}
-	fd, err := openRawSock(ifaceIndex)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
+		attachment.socketFD[ifaceIndex] = fd
+
+		err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_ATTACH_BPF, prog.FD())
 		if err != nil {
-			syscall.Close(fd)
+			klog.Errorf("Failed to set socket option for interface %d: %w\n", ifaceIndex, err)
+			continue
 		}
-	}()
-	err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_ATTACH_BPF, prog.FD())
-	if err != nil {
-		return nil, err
-	}
-	attachment := &ebpfAttachment{
-		socketFD: fd,
+
+		klog.Infof("Listening on interface %d\n", ifaceIndex)
 	}
 	return attachment, nil
 }
 
 // Close closes the underlying socket.
 func (a *ebpfAttachment) Close() {
-	if a.socketFD != -1 {
-		syscall.Close(a.socketFD)
-		a.socketFD = -1
+	for ifaceIndex := 0; ifaceIndex < len(a.socketFD); ifaceIndex++ {
+		if a.socketFD[ifaceIndex] > 0 {
+			syscall.Close(a.socketFD[ifaceIndex])
+			a.socketFD[ifaceIndex] = -1
+		}
 	}
 }
 
@@ -298,7 +296,7 @@ func initStatsMap(m *ebpf.Map) error {
 		innerMap, err := ebpf.NewMap(&ebpf.MapSpec{
 			Name:       "sni_stats",
 			Type:       ebpf.Hash,
-			KeySize:    C.TLS_MAX_SERVER_NAME_LEN,
+			KeySize:    C.TLS_MAX_SERVER_NAME_LEN+8,
 			ValueSize:  16,
 			MaxEntries: C.MAX_SERVER_COUNT,
 		})
@@ -381,6 +379,8 @@ const (
 // Mirrors the tuple_data_t C struct.
 type tupleData struct {
 	state                  connState
+	sourceIP net.IP
+	destIP net.IP
 	sni                    string
 	tickerClockFirstPacket uint64
 }
@@ -389,9 +389,17 @@ type tupleData struct {
 // it.
 func tupleDataFromC(td C.struct_tuple_data_t) *tupleData {
 	// TODO: Maybe we can avoid copying here.
-	sni := make([]byte, len(td.sni))
-	for i, c := range td.sni {
-		sni[i] = byte(c)
+	sourceIP := make([]byte, 4)
+	destIP := make([]byte, 4)
+	sni := make([]byte, C.TLS_MAX_SERVER_NAME_LEN)
+	for i, c := range td.i {
+		if i < 4 {
+			sourceIP[i] = byte(c)
+		} else if i < 8 {
+			destIP[i-4] = byte(c)
+		} else {
+			sni[i-8] = byte(c)
+		}
 	}
 
 	res := tupleData{
@@ -399,6 +407,8 @@ func tupleDataFromC(td C.struct_tuple_data_t) *tupleData {
 		// Cut the SNI at the first zero byte. This removes any zero bytes we
 		// get from the null-terminated C string and also ensures we don't have
 		// zero bytes in the middle of the SNI.
+		sourceIP: net.IP(sourceIP),
+		destIP: net.IP(destIP),
 		sni:                    string(bytes.SplitN(sni, []byte{0}, 2)[0]),
 		tickerClockFirstPacket: uint64(td.ticker_clock_first_packet),
 	}
@@ -423,7 +433,8 @@ func getStats(outerMap *ebpf.Map) (out []map[string][2]uint64, err error) {
 		var innerValue [2]uint64
 		innerEntries := innerMap.Iterate()
 		for innerEntries.Next(&innerKey, &innerValue) {
-			sniString := strings.SplitN(innerKey, "\000", 2)[0]
+			sniString := strings.SplitN(innerKey[8:], "\000", 2)[0]
+			klog.InfoS("getStats", "sni", sniString)
 
 			// succeeded_connections := innerValue[0]
 			// failed_connections := innerValue[1]
@@ -465,14 +476,20 @@ func setConnection(m *ebpf.Map, t *tuple, td *tupleData) error {
 	}
 
 	// TODO: Maybe we can avoid copying here.
-	var sni [C.TLS_MAX_SERVER_NAME_LEN]C.char
+	var sni [C.TLS_MAX_SERVER_NAME_LEN+8]byte
+	for i, v := range td.sourceIP {
+		sni[i] = v
+	}
+	for i, v := range td.destIP {
+		sni[i+4] = v
+	}
 	for i, v := range td.sni {
-		sni[i] = C.char(v)
+		sni[i+8] = byte(v)
 	}
 
 	v := C.struct_tuple_data_t{
 		state: uint32(td.state),
-		sni:   sni,
+		i:   sni,
 	}
 
 	return m.Put(unsafe.Pointer(&key), unsafe.Pointer(&v))

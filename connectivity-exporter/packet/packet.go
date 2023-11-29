@@ -8,11 +8,13 @@ import (
 	"context"
 	"fmt"
 	"m/metrics"
+	"net"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
+	"encoding/binary"
 	"github.com/cilium/ebpf"
 	"k8s.io/klog/v2"
 
@@ -31,6 +33,11 @@ type NetworkDataSource struct {
 
 type State struct {
 	snis map[string]time.Time
+}
+
+type ConnKey struct {
+	sourceIP, destIP string
+	sni string
 }
 
 // NewNetworkDataSource creates a new network data source based on
@@ -133,14 +140,14 @@ func (s *NetworkDataSource) TrackConnections(ctx context.Context, wg *sync.WaitG
 
 	// keep track of failed second between ticks for each SNI in order to
 	// carry over failed seconds during inactive seconds.
-	previousFailedSecond := map[string]bool{}
+	previousFailedSecond := map[ConnKey]bool{}
 
 	done := ctx.Done()
 	for {
 		select {
 		case <-ticks:
 			// Set of encountered SNIs, in either of the 2 maps
-			sniSet := map[string]struct{}{}
+			sniSet := map[ConnKey]struct{}{}
 			// oldConnections are the connections that were initiated C.STATS_SECONDS_COUNT seconds ago
 			oldConnections := make(map[C.struct_tuple_key_t]*tupleData)
 			connections := s.ebpfConfig.connectionMap.Iterate()
@@ -177,29 +184,29 @@ func (s *NetworkDataSource) TrackConnections(ctx context.Context, wg *sync.WaitG
 			// Get the union of SNIs from both BPF maps. Some SNIs
 			// might be in connectionMap only, in statsMap only, or
 			// in both.
-			for _, v := range oldConnections {
-				if v.sni != "" {
-					sniSet[v.sni] = struct{}{}
-				}
+			for k, v := range oldConnections {
+				sourceIP := net.IP{}
+				binary.LittleEndian.PutUint32(sourceIP, uint32(k.source_ip))
+				destIP := net.IP{}
+				binary.LittleEndian.PutUint32(destIP, uint32(k.dest_ip))
+				sniSet[ConnKey{sourceIP: sourceIP.String(), destIP: destIP.String(), sni: v.sni}] = struct{}{}
 			}
 			for k := range statsValuesAtKey {
-				if k != "" {
-					sniSet[k] = struct{}{}
-				}
+				sniSet[k] = struct{}{}
 			}
 
-			staleConnections := make(map[string][]*tupleData)
+			staleConnections := make(map[ConnKey][]*tupleData)
 			for sni := range sniSet {
 				staleConnections[sni] = []*tupleData{}
 			}
 
-			for _, v := range oldConnections {
-				if v.sni == "" {
-					// TODO: How to account for this connection if we don't know the SNI?
-					klog.Errorf("Empty SNI: %+v", v)
-				} else {
-					staleConnections[v.sni] = append(staleConnections[v.sni], v)
-				}
+			for k, v := range oldConnections {
+				sourceIP := net.IP{}
+				binary.LittleEndian.PutUint32(sourceIP, uint32(k.source_ip))
+				destIP := net.IP{}
+				binary.LittleEndian.PutUint32(destIP, uint32(k.dest_ip))
+				ck := ConnKey{sourceIP: sourceIP.String(), destIP: destIP.String(), sni: v.sni}
+				staleConnections[ck] = append(staleConnections[ck], v)
 			}
 
 			for sni := range sniSet {
@@ -251,7 +258,7 @@ func newState() *State {
 // Returned variable out is a map of sni to:
 // - succeeded_connections := innerValue[0]
 // - failed_connections := innerValue[1]
-func getOldestStatsAndCleanup(s *NetworkDataSource, statsKey uint64) (out map[string][2]uint64, err error) {
+func getOldestStatsAndCleanup(s *NetworkDataSource, statsKey uint64) (out map[ConnKey][2]uint64, err error) {
 	var innerMap *ebpf.Map
 
 	if err := s.ebpfConfig.statsMap.Lookup(unsafe.Pointer(&statsKey), &innerMap); err != nil {
@@ -260,11 +267,16 @@ func getOldestStatsAndCleanup(s *NetworkDataSource, statsKey uint64) (out map[st
 	var innerKey string
 	var innerValue [2]uint64
 	var innerKeysToBeDeleted []string
-	out = make(map[string][2]uint64)
+	out = make(map[ConnKey][2]uint64)
 	innerEntries := innerMap.Iterate()
 	for innerEntries.Next(&innerKey, &innerValue) {
-		sniString := strings.SplitN(innerKey, "\000", 2)[0]
-		out[sniString] = innerValue
+		key := ConnKey{
+			sourceIP: net.IP(innerKey[0:4]).String(),
+			destIP: net.IP(innerKey[4:8]).String(),
+			sni: strings.SplitN(innerKey[8:], "\000", 2)[0],
+		}
+		klog.InfoS("getOldestStatsAndCleanup", "source", key.sourceIP, "dest", key.destIP, "sni", key.sni)
+		out[key] = innerValue
 		innerKeysToBeDeleted = append(innerKeysToBeDeleted, innerKey)
 	}
 
@@ -286,20 +298,20 @@ func isConnectionOld(tickerClockFirstPacket, current_ticker_clock uint64) bool {
 }
 
 func (s *State) accountForConnections(
-	sni string,
+	connKey ConnKey,
 	previousFailedSecond bool,
 	staleConnMapInfo []*tupleData,
 	succeeded_connections, failed_connections uint64,
 ) (i *metrics.Inc, failedSecond bool) {
-	if sni == "" {
-		klog.Error("SNI is empty")
+	if connKey.sourceIP == "" {
+		klog.Error("source IP is empty")
 	}
-	if _, ok := s.snis[sni]; !ok {
-		s.snis[sni] = time.Now()
+	if _, ok := s.snis[connKey.sni]; !ok {
+		s.snis[connKey.sni] = time.Now()
 	}
-	inc := &metrics.Inc{SNI: sni}
+	inc := &metrics.Inc{SNI: connKey.sni, SourceIP: connKey.sourceIP, DestIP: connKey.destIP}
 
-	klog.V(2).Infof("sni: %s, connections: %d", sni, len(staleConnMapInfo))
+	klog.V(2).Infof("sni: %s, connections: %d", connKey.sni, len(staleConnMapInfo))
 	var activeSecond, activeFailedSecond bool
 
 	for _, v := range staleConnMapInfo {

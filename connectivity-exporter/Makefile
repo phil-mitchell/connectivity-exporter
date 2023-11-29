@@ -2,19 +2,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-REGISTRY ?= ghcr.io
-IMAGE_NAME ?= gardener/connectivity-exporter
-IMAGE_TAG ?= main
+REGISTRY ?= hanaservice-dev.common.repositories.cloud.sap
+IMAGE_NAME ?= connectivity-exporter
+IMAGE_TAG ?= i826622-test
 
 all: build
 
 .PHONY: docker/build
 docker/build:
-	docker build -t $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
 
 .PHONY: docker/push
 docker/push:
-	docker push $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+	../../hc-landscape/hc push-artifacts $(IMAGE_NAME):$(IMAGE_TAG) --user-id i826622
 
 CLANG_OS_FLAGS = ""
 

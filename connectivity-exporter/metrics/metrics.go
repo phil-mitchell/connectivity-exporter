@@ -56,12 +56,13 @@ func Apply(ctx context.Context, wg *sync.WaitGroup, incs <-chan *Inc, snapshots 
 }
 
 func (inc *Inc) apply() {
-	seconds.WithLabelValues("active", inc.SNI).Add(inc.ActiveSeconds)
-	seconds.WithLabelValues("failed", inc.SNI).Add(inc.FailedSeconds)
-	seconds.WithLabelValues("active_failed", inc.SNI).Add(inc.ActiveFailedSeconds)
-	connections.WithLabelValues("successful", inc.SNI).Add(inc.SuccessfulConnections)
-	connections.WithLabelValues("rejected", inc.SNI).Add(inc.RejectedConnections)
-	connections.WithLabelValues("rejected_by_client", inc.SNI).Add(inc.RejectedConnectionsByClient)
+	klog.InfoS("apply", "source", inc.SourceIP, "dest", inc.DestIP, "sni", inc.SNI)
+	seconds.WithLabelValues("active", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.ActiveSeconds)
+	seconds.WithLabelValues("failed", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.FailedSeconds)
+	seconds.WithLabelValues("active_failed", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.ActiveFailedSeconds)
+	connections.WithLabelValues("successful", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.SuccessfulConnections)
+	connections.WithLabelValues("rejected", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.RejectedConnections)
+	connections.WithLabelValues("rejected_by_client", inc.SNI, inc.SourceIP, inc.DestIP).Add(inc.RejectedConnectionsByClient)
 }
 
 func applySnapshot(snapshot promextra.Snapshot) {
